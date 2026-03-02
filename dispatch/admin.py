@@ -98,7 +98,6 @@ class DutyForm(forms.Form):
     start_date = forms.DateField(widget=forms.DateInput(attrs={'type': 'date'}), label="Дата начала")
     end_date = forms.DateField(required=False, widget=forms.DateInput(attrs={'type': 'date'}),
                                label="Дата окончания (Опционально)")
-    only_weekends = forms.BooleanField(required=False, label="Только по выходным")
     duty_step = forms.IntegerField(required=False, min_value=1, label="Шаг дежурства (дней) (Опционально)")
     rest_step = forms.IntegerField(required=False, min_value=1, label="Шаг отдыха (дней) (Опционально)")
 
@@ -137,32 +136,43 @@ class DutyRoleAdmin(CustomAdmin):
                 end_date = duty_form.cleaned_data["end_date"]
                 if end_date is None:
                     end_date = start_date
-                only_weekends = duty_form.cleaned_data.get("only_weekends") or False
 
-                if only_weekends:
-                    ranges = get_non_working_ranges(start_date, end_date)
-                    for range_start, range_end in ranges:
-                        if duty_overlaps_range(duty_role, range_start, range_end):
-                            continue
-                        get_or_create_duty_range(
-                            range_start, range_end, duty_role, defaults={"user": user}
-                        )
-                else:
-                    duty_step = duty_form.cleaned_data.get("duty_step") or 1
-                    rest_step = duty_form.cleaned_data.get("rest_step") or 0
-                    current_date = start_date
-                    while current_date <= end_date:
-                        for _ in range(duty_step):
-                            if current_date > end_date:
-                                break
+                # Нерабочие дни по производственному календарю: объединяем в длинные дежурства
+                ranges = get_non_working_ranges(start_date, end_date)
+                non_working_days = set()
+                for range_start, range_end in ranges:
+                    current = range_start
+                    while current <= range_end:
+                        non_working_days.add(current)
+                        current += timedelta(days=1)
+
+                for range_start, range_end in ranges:
+                    if duty_overlaps_range(duty_role, range_start, range_end):
+                        continue
+                    duty, created = get_or_create_duty_range(
+                        range_start, range_end, duty_role, defaults={"user": user}
+                    )
+                    if not created:
+                        duty.user = user
+                        duty.save()
+
+                # На рабочие дни продолжаем создавать обычные дежурства по шагу/отдыху
+                duty_step = duty_form.cleaned_data.get("duty_step") or 1
+                rest_step = duty_form.cleaned_data.get("rest_step") or 0
+                current_date = start_date
+                while current_date <= end_date:
+                    for _ in range(duty_step):
+                        if current_date > end_date:
+                            break
+                        if current_date not in non_working_days:
                             duty, created = get_or_create_duty(
                                 duty_date=current_date, role=duty_role, defaults={"user": user}
                             )
                             if not created:
                                 duty.user = user
                             duty.save()
-                            current_date += timedelta(days=1)
-                        current_date += timedelta(days=rest_step)
+                        current_date += timedelta(days=1)
+                    current_date += timedelta(days=rest_step)
         elif request.method == "POST" and request.POST.get("form_type") == "clear_duty_form":
             clear_duty_form = ClearDutyForm(request.POST)
             if clear_duty_form.is_valid():
