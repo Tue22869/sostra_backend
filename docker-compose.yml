@@ -1,6 +1,21 @@
-version: '3.8'
-
 services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sostra}
+      POSTGRES_USER: ${POSTGRES_USER:-sostra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sostra}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   django:
     build: .
     command: gunicorn myproject.wsgi -c gunicorn.conf.py
@@ -14,6 +29,8 @@ services:
       - .env
     environment:
       ENABLE_CRON: "1"
+      RUN_MIGRATIONS: "1"
+      RUN_CREATE_GROUPS: "1"
 
   tgbot:
     build: .
@@ -24,6 +41,8 @@ services:
       - .env
     environment:
       ENABLE_CRON: "0"
+      RUN_MIGRATIONS: "0"
+      RUN_CREATE_GROUPS: "0"
 
   nginx:
     image: nginx:latest
@@ -65,3 +84,4 @@ services:
 volumes:
   static_volume:
   media_volume:
+  postgres_data:

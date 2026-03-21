@@ -4,6 +4,7 @@ djangorestframework==3.15.1
 pytz==2024.1
 django-admin-interface==0.28.6
 gunicorn==23.0.0
+psycopg[binary]==3.2.12
 openpyxl==3.1.5
 djangorestframework_simplejwt==5.3.1
 django-storages[s3]==1.14.4
