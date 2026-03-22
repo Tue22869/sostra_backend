@@ -25,6 +25,7 @@ from myapp.admin_mixins import CustomAdmin
 from myapp.custom_groups import UserManager, SeniorUserManager, CanteenAdminManager
 from myapp.excel import fire_extinguishers, guards_stats
 from myapp.models import Guard, Round, Visit, Point, Message, Device
+from myapp.scheduler_admin import register_scheduler_admin
 from myapp.services.guards import get_manager_guards, get_guard_by_guard_id
 from myapp.services.messages import messages_by_user
 from myproject.settings import AUTH_USER_MODEL
@@ -508,3 +509,4 @@ admin.site.register(Device)
 register_food_admin(admin.site)
 register_dispatch_admin(admin.site)
 register_user_admin(admin.site)
+register_scheduler_admin(admin.site)

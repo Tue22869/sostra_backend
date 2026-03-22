@@ -3,6 +3,7 @@ import sys
 import time
 
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from django.conf import settings
 from django.core.management import BaseCommand
@@ -10,6 +11,7 @@ from django_apscheduler.jobstores import DjangoJobStore, register_events, regist
 import structlog
 
 from myproject.observability import bound_log_context
+from myapp.scheduler_utils import cleanup_old_job_executions, get_job_execution_retention_days
 
 
 logger = structlog.get_logger(__name__)
@@ -50,6 +52,31 @@ def check_missing_duties_job():
     with bound_log_context(execution_source="scheduler", job_name="check_missing_duties"):
         check_missing_duties()
         logger.info("scheduler_job_finished", job_name="check_missing_duties")
+
+
+@register_job(
+    scheduler,
+    trigger=CronTrigger(hour=3, minute=0),
+    id="cleanup_old_job_executions",
+    replace_existing=True,
+    max_instances=1,
+)
+def cleanup_old_job_executions_job():
+    retention_days = get_job_execution_retention_days()
+    with bound_log_context(
+        execution_source="scheduler",
+        job_name="cleanup_old_job_executions",
+        retention_days=retention_days,
+    ):
+        deleted_execution_count = cleanup_old_job_executions(
+            retention_days=retention_days
+        )
+        logger.info(
+            "scheduler_job_finished",
+            job_name="cleanup_old_job_executions",
+            deleted_execution_count=deleted_execution_count,
+            retention_days=retention_days,
+        )
 
 
 class Command(BaseCommand):
