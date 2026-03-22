@@ -3,6 +3,7 @@ from datetime import date, timedelta
 from django import forms
 from django.contrib import admin
 from django.contrib.admin import AdminSite
+from django.core.exceptions import PermissionDenied
 from django.shortcuts import render
 from django.urls import path, reverse
 from django.utils.html import format_html
@@ -108,11 +109,79 @@ class DutyForm(forms.Form):
     duty_step = forms.IntegerField(required=False, min_value=1, label="Шаг дежурства (дней) (Опционально)")
     rest_step = forms.IntegerField(required=False, min_value=1, label="Шаг отдыха (дней) (Опционально)")
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        min_date = today().isoformat()
+        self.fields['start_date'].widget.attrs['min'] = min_date
+        self.fields['end_date'].widget.attrs['min'] = min_date
+
+    def clean(self):
+        cleaned_data = super().clean()
+        start_date = cleaned_data.get('start_date')
+        end_date = cleaned_data.get('end_date')
+
+        if start_date and start_date < today():
+            self.add_error('start_date', 'Нельзя назначать дежурства на прошедшие даты.')
+
+        if start_date and end_date and end_date < start_date:
+            self.add_error('end_date', 'Дата окончания не может быть раньше даты начала.')
+
+        return cleaned_data
+
 
 class ClearDutyForm(forms.Form):
     start_date = forms.DateField(widget=forms.DateInput(attrs={'type': 'date'}), label="Дата начала")
     end_date = forms.DateField(required=False, widget=forms.DateInput(attrs={'type': 'date'}),
                                label="Дата окончания")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        min_date = today().isoformat()
+        self.fields['start_date'].widget.attrs['min'] = min_date
+        self.fields['end_date'].widget.attrs['min'] = min_date
+
+    def clean(self):
+        cleaned_data = super().clean()
+        start_date = cleaned_data.get('start_date')
+        end_date = cleaned_data.get('end_date')
+
+        if start_date and start_date < today():
+            self.add_error('start_date', 'Нельзя изменять дежурства на прошедшие даты.')
+
+        if start_date and end_date and end_date < start_date:
+            self.add_error('end_date', 'Дата окончания не может быть раньше даты начала.')
+
+        return cleaned_data
+
+
+class DutyAdminForm(forms.ModelForm):
+    class Meta:
+        model = Duty
+        fields = '__all__'
+
+    def clean(self):
+        cleaned_data = super().clean()
+        start_datetime = cleaned_data.get('start_datetime')
+        if start_datetime is None:
+            return cleaned_data
+
+        start_date = start_datetime.date()
+        current_date = today()
+
+        if self.instance.pk:
+            original = Duty.objects.filter(pk=self.instance.pk).only('start_datetime').first()
+            if original and original.start_datetime.date() >= current_date and start_date < current_date:
+                self.add_error(
+                    'start_datetime',
+                    'Нельзя переносить дежурство на прошедшую дату.',
+                )
+        elif start_date < current_date:
+            self.add_error(
+                'start_datetime',
+                'Нельзя создавать дежурство на прошедшую дату.',
+            )
+
+        return cleaned_data
 
 
 class ExploitationRoleAdmin(CustomAdmin):
@@ -238,6 +307,7 @@ class DutyRoleAdmin(CustomAdmin):
     next_duty_stats.short_description = 'Кол-во распланированных дней'
 
 class DutyAdmin(CustomAdmin):
+    form = DutyAdminForm
     autocomplete_fields = (
         'notification_duty_is_coming',
         'notification_duty_reminder',
@@ -248,6 +318,45 @@ class DutyAdmin(CustomAdmin):
         if request.user.is_superuser:
             return None
         return ('notification_need_to_open', 'notification_duty_is_coming')
+
+    def has_change_permission(self, request, obj=None):
+        has_perm = super().has_change_permission(request, obj)
+        if not has_perm:
+            return False
+        if obj and obj.has_ended() and request.method not in ('GET', 'HEAD', 'OPTIONS'):
+            return False
+        return has_perm
+
+    def has_delete_permission(self, request, obj=None):
+        has_perm = super().has_delete_permission(request, obj)
+        if not has_perm:
+            return False
+        if obj and obj.has_ended():
+            return False
+        return has_perm
+
+    def get_readonly_fields(self, request, obj=None):
+        readonly_fields = list(super().get_readonly_fields(request, obj))
+        if obj and obj.has_ended():
+            readonly_fields.extend(field.name for field in self.model._meta.fields)
+        return tuple(dict.fromkeys(readonly_fields))
+
+    def changeform_view(self, request, object_id=None, form_url='', extra_context=None):
+        obj = self.get_object(request, object_id) if object_id else None
+        if obj and obj.has_ended() and request.method not in ('GET', 'HEAD', 'OPTIONS'):
+            raise PermissionDenied("Нельзя редактировать завершенное дежурство.")
+
+        extra_context = extra_context or {}
+        if obj and obj.has_ended():
+            extra_context['show_save'] = False
+            extra_context['show_save_and_add_another'] = False
+            extra_context['show_save_and_continue'] = False
+        else:
+            extra_context.setdefault('show_save', False)
+            extra_context.setdefault('show_save_and_add_another', False)
+            extra_context.setdefault('show_save_and_continue', True)
+
+        return admin.ModelAdmin.changeform_view(self, request, object_id, form_url, extra_context)
 
 
 class IncidentAdmin(CustomAdmin):

@@ -2,6 +2,7 @@ import enum
 import os
 import uuid
 
+from django.core.exceptions import ValidationError
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
@@ -12,6 +13,7 @@ from storages.backends.s3boto3 import S3Boto3Storage
 
 from myproject import settings
 from myproject.settings import AUTH_USER_MODEL
+from dispatch.utils import now
 
 
 class DispatchS3MediaStorage(S3Boto3Storage):
@@ -99,6 +101,22 @@ class Duty(models.Model):
     @property
     def date(self):
         return self.start_datetime.date() if self.start_datetime else None
+
+    def has_ended(self, current_datetime=None):
+        current_datetime = current_datetime or now()
+        return bool(self.end_datetime and self.end_datetime <= current_datetime)
+
+    def clean(self):
+        if not self.pk:
+            return
+
+        original = type(self).objects.filter(pk=self.pk).only('end_datetime').first()
+        if original and original.end_datetime and original.end_datetime <= now():
+            raise ValidationError("Нельзя редактировать завершенное дежурство.")
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.user} - {self.date} ({self.role})"

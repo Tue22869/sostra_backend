@@ -311,6 +311,9 @@ class DutyViewSet(viewsets.ReadOnlyModelViewSet):  # ReadOnly since no update/cr
     def open(self, request, pk=None):
         duty = get_duty_by_id(pk)
 
+        if duty.has_ended():
+            return Response({"error": "Нельзя открыть завершённое дежурство"}, status=400)
+
         if duty.user != request.user:
             return Response({"error": "Открыть дежурство может только сам дежурный"}, status=403)
 
@@ -323,6 +326,9 @@ class DutyViewSet(viewsets.ReadOnlyModelViewSet):  # ReadOnly since no update/cr
     @action(detail=True, methods=['post'])
     def transfer_duty(self, request, pk=None):
         duty = get_duty_by_id(pk)
+
+        if duty.has_ended():
+            return Response({"error": "Нельзя изменять завершённое дежурство"}, status=400)
 
         if duty.user != request.user:
             return Response({"error": "Передать дежурство может только сам дежурный"}, status=403)
@@ -423,6 +429,9 @@ class DutyViewSet(viewsets.ReadOnlyModelViewSet):  # ReadOnly since no update/cr
 
         duty_action = notification.duty_action
         duty = duty_action.duty
+
+        if duty.has_ended():
+            return Response({"error": "Нельзя изменять завершённое дежурство"}, status=400)
 
         # Проверяем права админа
         from .models import DutyPoint
