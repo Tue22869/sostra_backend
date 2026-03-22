@@ -16,6 +16,28 @@ services:
       timeout: 5s
       retries: 5
 
+  postgres-backup:
+    image: postgres:16
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sostra}
+      POSTGRES_USER: ${POSTGRES_USER:-sostra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sostra}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_BACKUP_DIR: /backups
+      POSTGRES_BACKUP_KEEP_DAYS: ${POSTGRES_BACKUP_KEEP_DAYS:-7}
+      POSTGRES_BACKUP_INTERVAL_SECONDS: ${POSTGRES_BACKUP_INTERVAL_SECONDS:-86400}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./docker/postgres-backup.sh:/usr/local/bin/postgres-backup.sh:ro
+      - ./backups/postgres:/backups
+    entrypoint: ["/bin/sh", "/usr/local/bin/postgres-backup.sh"]
+
   django:
     build: .
     command: gunicorn myproject.wsgi -c gunicorn.conf.py
