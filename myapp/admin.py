@@ -15,6 +15,7 @@ from django.shortcuts import get_object_or_404, render, redirect
 from django.urls import path
 from django.urls import reverse
 from django.utils.html import format_html
+from simple_history.admin import SimpleHistoryAdmin
 
 from dispatch.admin import register_dispatch_admin
 from food.admin import register_food_admin
@@ -392,7 +393,7 @@ class CustomUserCreationForm(UserCreationForm):
         return phone
 
 
-class CustomUserAdmin(UserAdmin):
+class CustomUserAdmin(SimpleHistoryAdmin, UserAdmin):
     add_form = CustomUserCreationForm
     
     add_fieldsets = (
@@ -496,7 +497,13 @@ admin.site.register(Visit, VisitAdmin)
 admin.site.register(Point, PointAdmin)
 admin.site.register(Message, MessageAdmin)
 admin.site.register(get_user_model(), CustomUserAdmin, ordering=get_user_model()._meta.ordering)
-admin.site.register(Group, GroupAdmin)
+
+
+class HistoryGroupAdmin(SimpleHistoryAdmin, GroupAdmin):
+    pass
+
+
+admin.site.register(Group, HistoryGroupAdmin)
 admin.site.register(Device)
 register_food_admin(admin.site)
 register_dispatch_admin(admin.site)

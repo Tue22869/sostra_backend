@@ -3,6 +3,7 @@ from enum import Enum
 from django.contrib.auth.models import Group, Permission
 from django.contrib.contenttypes.models import ContentType
 from django.core.management.base import BaseCommand
+import structlog
 
 from myapp.custom_groups import (
     QRManager,
@@ -15,6 +16,9 @@ from myapp.custom_groups import (
     DispatchAdminManager,
     DispatchSuperViewer
 )
+
+
+logger = structlog.get_logger(__name__)
 
 
 class PermissionType(str, Enum):
@@ -107,7 +111,12 @@ class Command(BaseCommand):
                 for permission in ALL_PERMISSIONS:
                     codename = f'{permission.value}_{model_name}'
 
-                    print(codename, content_type)
+                    logger.info(
+                        "group_permission_sync_checked",
+                        group_name=custom_group.name,
+                        codename=codename,
+                        content_type_id=content_type.id,
+                    )
                     p, _ = Permission.objects.get_or_create(codename=codename, content_type=content_type)
                     if permission in roles[custom_group][model_name]:
                         if not group.permissions.filter(codename=p.codename).exists():

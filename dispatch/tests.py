@@ -3,18 +3,21 @@ from datetime import timedelta
 from django.test import TestCase
 from django.urls import reverse
 from django.core.exceptions import ValidationError
-from rest_framework.test import APIRequestFactory, force_authenticate
+from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from dispatch.admin import ClearDutyForm, DutyAdminForm, DutyForm
-from dispatch.models import Duty, DutyAction, DutyActionTypeEnum, DutyRole
+from dispatch.models import Duty, DutyAction, DutyActionTypeEnum, DutyRole, Incident
 from dispatch.views import DutyViewSet
 from dispatch.utils import now, today
+from dispatch.models import IncidentStatusEnum
 from users.models import Notification, NotificationSourceEnum, User
 
 
 class DutyProtectionTests(TestCase):
     def setUp(self):
         self.factory = APIRequestFactory()
+        self.api_client = APIClient()
         self.role = DutyRole.objects.create(name="Test role")
         self.user = User.objects.create_user(username="duty-user", password="pass")
         self.other_user = User.objects.create_user(username="other-user", password="pass")
@@ -159,3 +162,72 @@ class DutyProtectionTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 403)
+
+    def test_admin_response_contains_request_id_header(self):
+        self.client.force_login(self.superuser)
+
+        response = self.client.get(reverse("admin:index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response["X-Request-ID"])
+
+    def test_duty_history_tracks_jwt_api_change(self):
+        duty = Duty.objects.create(
+            user=self.user,
+            role=self.role,
+            start_datetime=now() - timedelta(minutes=10),
+            end_datetime=now() + timedelta(hours=8),
+        )
+        access_token = str(RefreshToken.for_user(self.user).access_token)
+
+        response = self.api_client.post(
+            f"/api/dispatch/duties/{duty.id}/open/",
+            HTTP_AUTHORIZATION=f"Bearer {access_token}",
+            HTTP_X_REQUEST_ID="req-duty-history",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["X-Request-ID"], "req-duty-history")
+
+        duty.refresh_from_db()
+        history_record = duty.history.first()
+
+        self.assertTrue(duty.is_opened)
+        self.assertEqual(history_record.history_user, self.user)
+        self.assertEqual(history_record.history_type, "~")
+        self.assertTrue(history_record.is_opened)
+
+        self.client.force_login(self.superuser)
+        admin_history_response = self.client.get(
+            reverse("admin:dispatch_duty_history", args=[duty.id])
+        )
+        self.assertEqual(admin_history_response.status_code, 200)
+
+    def test_incident_history_tracks_jwt_api_change(self):
+        incident = Incident.objects.create(
+            name="Test incident",
+            description="Test description",
+            status=IncidentStatusEnum.OPENED.value,
+            author=self.user,
+            responsible_user=self.user,
+        )
+        access_token = str(RefreshToken.for_user(self.user).access_token)
+
+        response = self.api_client.post(
+            f"/api/dispatch/incidents/{incident.id}/change_status/",
+            {"status": IncidentStatusEnum.CLOSED.value},
+            format="json",
+            HTTP_AUTHORIZATION=f"Bearer {access_token}",
+            HTTP_X_REQUEST_ID="req-incident-history",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["X-Request-ID"], "req-incident-history")
+
+        incident.refresh_from_db()
+        history_record = incident.history.first()
+
+        self.assertEqual(incident.status, IncidentStatusEnum.CLOSED.value)
+        self.assertEqual(history_record.history_user, self.user)
+        self.assertEqual(history_record.history_type, "~")
+        self.assertEqual(history_record.status, IncidentStatusEnum.CLOSED.value)

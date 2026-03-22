@@ -4,6 +4,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
 from django.utils.dateparse import parse_date
+import structlog
 from rest_framework import status
 from rest_framework import viewsets
 from rest_framework.decorators import action
@@ -53,6 +54,29 @@ from .services.notification import create_and_notify, notify_point_admins, notif
 from .utils import now
 
 
+logger = structlog.get_logger(__name__)
+
+
+def _incident_context(incident):
+    return {
+        "incident_id": incident.id,
+        "incident_status": incident.status,
+        "incident_level": incident.level,
+        "incident_point_id": incident.point_id,
+        "incident_responsible_user_id": incident.responsible_user_id,
+    }
+
+
+def _duty_context(duty):
+    return {
+        "duty_id": duty.id,
+        "duty_user_id": duty.user_id,
+        "duty_role_id": duty.role_id,
+        "duty_is_opened": duty.is_opened,
+        "duty_is_forced_opened": duty.is_forced_opened,
+    }
+
+
 class ListRetrieveOnlyPermission(BasePermission):
     def has_permission(self, request, view):
         if request.method in SAFE_METHODS:
@@ -90,13 +114,33 @@ class IncidentViewSet(viewsets.ViewSet):
         current_dt = now()
         current_time = current_dt.time().replace(tzinfo=None)
         if is_working_day(current_dt.date()) and (time(8, 30) <= current_time <= time(17, 30)):
+            logger.warning(
+                "incident_create_blocked_working_hours",
+                requested_by_user_id=request.user.id,
+                request_point_id=request.data.get("point_id"),
+                request_incident_name=request.data.get("name"),
+            )
             return Response(
                 {"error": "Создание инцидентов запрещено в рабочие дни с 08:30 до 17:30."},
                 status=403,
             )
+
+        logger.info(
+            "incident_create_requested",
+            requested_by_user_id=request.user.id,
+            request_point_id=request.data.get("point_id"),
+            request_incident_name=request.data.get("name"),
+            is_critical=request.data.get("is_critical"),
+        )
         serializer = IncidentSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             incident = serializer.save()
+            logger.info(
+                "incident_created_via_api",
+                **_incident_context(incident),
+                author_id=incident.author_id,
+                incident_name=incident.name,
+            )
             if incident.point:
                 notify_duty_point_participants(
                     incident.point,
@@ -106,6 +150,11 @@ class IncidentViewSet(viewsets.ViewSet):
                 )
             escalate_incident(incident, request.user)
             return Response(serializer.data, status=201)
+        logger.warning(
+            "incident_create_validation_failed",
+            requested_by_user_id=request.user.id,
+            errors=serializer.errors,
+        )
         return Response(serializer.errors, status=400)
 
     @action(detail=True, methods=["get"])
@@ -138,14 +187,38 @@ class IncidentViewSet(viewsets.ViewSet):
         is_admin = has_dispatch_admin_rights(request.user, incident.point)
 
         if incident.responsible_user != request.user and not is_admin:
+            logger.warning(
+                "incident_status_change_forbidden",
+                **_incident_context(incident),
+                requested_by_user_id=request.user.id,
+                requested_status=request.data.get("status"),
+            )
             return Response({"error": "Вы не являетесь ответственным за этот инцидент"}, status=403)
 
         new_status = request.data.get("status")
+        logger.info(
+            "incident_status_change_requested",
+            **_incident_context(incident),
+            requested_by_user_id=request.user.id,
+            requested_status=new_status,
+            is_dispatch_admin=is_admin,
+        )
 
         if new_status not in [e.value for e in IncidentStatusEnum]:
+            logger.warning(
+                "incident_status_change_invalid_status",
+                **_incident_context(incident),
+                requested_by_user_id=request.user.id,
+                requested_status=new_status,
+            )
             return Response({"error": "Некорректный статус"}, status=400)
 
         if new_status in ["force_closed"] and not is_admin:
+            logger.warning(
+                "incident_force_close_forbidden",
+                **_incident_context(incident),
+                requested_by_user_id=request.user.id,
+            )
             return Response({"error": "Принудительно закрыть может только dispatch_admin_manager"}, status=400)
 
         old_status = incident.status
@@ -191,8 +264,20 @@ class IncidentViewSet(viewsets.ViewSet):
                             NotificationSourceEnum.DISPATCH.value,
                         )
                 else:
+                    logger.warning(
+                        "incident_acceptance_forbidden",
+                        **_incident_context(incident),
+                        requested_by_user_id=request.user.id,
+                    )
                     return Response({"error": "Принять инцидент может только ответственный"}, status=403)
 
+        logger.info(
+            "incident_status_change_finished",
+            **_incident_context(incident),
+            requested_by_user_id=request.user.id,
+            old_status=old_status,
+            new_status=new_status,
+        )
         serializer = IncidentSerializer(incident)
         return Response(serializer.data)
 
@@ -203,10 +288,26 @@ class IncidentViewSet(viewsets.ViewSet):
         is_admin = has_dispatch_admin_rights(request.user, incident.point)
 
         if incident.responsible_user != request.user and not is_admin:
+            logger.warning(
+                "incident_escalation_forbidden",
+                **_incident_context(incident),
+                requested_by_user_id=request.user.id,
+            )
             return Response({"error": "Вы не являетесь ответственным за этот инцидент"}, status=403)
 
+        logger.info(
+            "incident_escalation_requested",
+            **_incident_context(incident),
+            requested_by_user_id=request.user.id,
+            is_dispatch_admin=is_admin,
+        )
         escalate_incident(incident, request.user)
 
+        logger.info(
+            "incident_escalation_completed",
+            **_incident_context(incident),
+            requested_by_user_id=request.user.id,
+        )
         serializer = IncidentSerializer(incident)
         return Response(serializer.data)
 
@@ -312,14 +413,26 @@ class DutyViewSet(viewsets.ReadOnlyModelViewSet):  # ReadOnly since no update/cr
         duty = get_duty_by_id(pk)
 
         if duty.has_ended():
+            logger.warning(
+                "duty_open_rejected_ended",
+                **_duty_context(duty),
+                requested_by_user_id=request.user.id,
+            )
             return Response({"error": "Нельзя открыть завершённое дежурство"}, status=400)
 
         if duty.user != request.user:
+            logger.warning(
+                "duty_open_forbidden",
+                **_duty_context(duty),
+                requested_by_user_id=request.user.id,
+            )
             return Response({"error": "Открыть дежурство может только сам дежурный"}, status=403)
 
+        logger.info("duty_open_requested", **_duty_context(duty), requested_by_user_id=request.user.id)
         duty.is_opened = True
         duty.save()
 
+        logger.info("duty_open_finished", **_duty_context(duty), requested_by_user_id=request.user.id)
         serializer = DutySerializer(duty)
         return Response(serializer.data)
 
@@ -328,15 +441,33 @@ class DutyViewSet(viewsets.ReadOnlyModelViewSet):  # ReadOnly since no update/cr
         duty = get_duty_by_id(pk)
 
         if duty.has_ended():
+            logger.warning(
+                "duty_transfer_rejected_ended",
+                **_duty_context(duty),
+                requested_by_user_id=request.user.id,
+            )
             return Response({"error": "Нельзя изменять завершённое дежурство"}, status=400)
 
         if duty.user != request.user:
+            logger.warning(
+                "duty_transfer_forbidden",
+                **_duty_context(duty),
+                requested_by_user_id=request.user.id,
+            )
             return Response({"error": "Передать дежурство может только сам дежурный"}, status=403)
 
         new_user_id = request.data.get("user_id")
         user_reason = request.data.get("user_reason")
         if not user_reason or len(user_reason) == 0:
             user_reason = "не указана"
+
+        logger.info(
+            "duty_transfer_requested",
+            **_duty_context(duty),
+            requested_by_user_id=request.user.id,
+            requested_new_user_id=new_user_id,
+            reason=user_reason,
+        )
 
         if new_user_id == 0:
             # Создаем запись об отказе
@@ -346,6 +477,13 @@ class DutyViewSet(viewsets.ReadOnlyModelViewSet):  # ReadOnly since no update/cr
                 action_type=DutyActionTypeEnum.REFUSAL.value,
                 reason=user_reason,
                 is_resolved=False,
+            )
+            logger.warning(
+                "duty_refusal_created",
+                **_duty_context(duty),
+                requested_by_user_id=request.user.id,
+                duty_action_id=duty_action.id,
+                reason=user_reason,
             )
 
             for point in get_duty_point_by_duty_role(duty.role):
@@ -365,6 +503,12 @@ class DutyViewSet(viewsets.ReadOnlyModelViewSet):  # ReadOnly since no update/cr
             return Response(status=204)
 
         if not get_user_model().objects.filter(pk=new_user_id).exists():
+            logger.warning(
+                "duty_transfer_invalid_new_user",
+                **_duty_context(duty),
+                requested_by_user_id=request.user.id,
+                requested_new_user_id=new_user_id,
+            )
             return Response(
                 {"error": "Поле user_id в теле запроса некорректное"}, status=403
             )
@@ -387,6 +531,15 @@ class DutyViewSet(viewsets.ReadOnlyModelViewSet):  # ReadOnly since no update/cr
         duty.save()
 
         serializer = DutySerializer(duty)
+        logger.info(
+            "duty_transfer_finished",
+            **_duty_context(duty),
+            requested_by_user_id=request.user.id,
+            previous_user_id=request.user.id,
+            new_user_id=new_user.id,
+            duty_action_id=duty_action.id,
+            reason=user_reason,
+        )
         create_and_notify(
             new_user,
             "Вам передано дежурство",
@@ -411,6 +564,10 @@ class DutyViewSet(viewsets.ReadOnlyModelViewSet):  # ReadOnly since no update/cr
         """Переназначить дежурство админом через уведомление"""
         notification_id = request.data.get("notification_id")
         if not notification_id:
+            logger.warning(
+                "duty_reassign_missing_notification_id",
+                requested_by_user_id=request.user.id,
+            )
             return Response({"error": "Необходимо указать notification_id"}, status=400)
 
         try:
@@ -420,9 +577,19 @@ class DutyViewSet(viewsets.ReadOnlyModelViewSet):  # ReadOnly since no update/cr
                 id=notification_id, user=request.user
             )
         except Notification.DoesNotExist:
+            logger.warning(
+                "duty_reassign_notification_not_found",
+                requested_by_user_id=request.user.id,
+                notification_id=notification_id,
+            )
             return Response({"error": "Уведомление не найдено"}, status=404)
 
         if not notification.duty_action:
+            logger.warning(
+                "duty_reassign_notification_without_action",
+                requested_by_user_id=request.user.id,
+                notification_id=notification.id,
+            )
             return Response(
                 {"error": "Уведомление не связано с действием дежурства"}, status=400
             )
@@ -431,6 +598,12 @@ class DutyViewSet(viewsets.ReadOnlyModelViewSet):  # ReadOnly since no update/cr
         duty = duty_action.duty
 
         if duty.has_ended():
+            logger.warning(
+                "duty_reassign_rejected_ended",
+                **_duty_context(duty),
+                requested_by_user_id=request.user.id,
+                notification_id=notification.id,
+            )
             return Response({"error": "Нельзя изменять завершённое дежурство"}, status=400)
 
         # Проверяем права админа
@@ -451,19 +624,46 @@ class DutyViewSet(viewsets.ReadOnlyModelViewSet):  # ReadOnly since no update/cr
         )
 
         if not (is_dispatch_admin or is_point_admin):
+            logger.warning(
+                "duty_reassign_forbidden",
+                **_duty_context(duty),
+                requested_by_user_id=request.user.id,
+                notification_id=notification.id,
+            )
             return Response(
                 {"error": "Только админ может переназначить дежурного"}, status=403
             )
 
         new_user_id = request.data.get("user_id")
         if not new_user_id:
+            logger.warning(
+                "duty_reassign_missing_new_user",
+                **_duty_context(duty),
+                requested_by_user_id=request.user.id,
+                notification_id=notification.id,
+            )
             return Response({"error": "Необходимо указать user_id"}, status=400)
 
         if not get_user_model().objects.filter(pk=new_user_id).exists():
+            logger.warning(
+                "duty_reassign_new_user_not_found",
+                **_duty_context(duty),
+                requested_by_user_id=request.user.id,
+                requested_new_user_id=new_user_id,
+            )
             return Response({"error": "Пользователь не найден"}, status=404)
 
         new_user = get_user_model().objects.get(pk=new_user_id)
         old_user = duty.user
+        logger.info(
+            "duty_reassign_requested",
+            **_duty_context(duty),
+            requested_by_user_id=request.user.id,
+            old_user_id=old_user.id,
+            new_user_id=new_user.id,
+            notification_id=notification.id,
+            duty_action_id=duty_action.id,
+        )
 
         # Переназначаем дежурство
         duty.user = new_user
@@ -496,6 +696,15 @@ class DutyViewSet(viewsets.ReadOnlyModelViewSet):  # ReadOnly since no update/cr
                 NotificationSourceEnum.DISPATCH.value,
             )
 
+        logger.info(
+            "duty_reassign_finished",
+            **_duty_context(duty),
+            requested_by_user_id=request.user.id,
+            old_user_id=old_user.id,
+            new_user_id=new_user.id,
+            notification_id=notification.id,
+            resolved_action_count=unresolved_actions.count(),
+        )
         serializer = DutySerializer(duty)
         return Response(serializer.data)
 
@@ -517,6 +726,12 @@ class IncidentMessageViewSet(viewsets.ModelViewSet):
     def create(self, request, **kwargs):
         user = request.user if request.user.is_authenticated else None
         message_type = request.data.get("message_type")
+        logger.info(
+            "incident_message_create_requested",
+            incident_id=self.kwargs["incident_pk"],
+            requested_by_user_id=user.id if user else None,
+            message_type=message_type,
+        )
 
         msg = IncidentMessage.objects.create(
             user=user,
@@ -534,6 +749,12 @@ class IncidentMessageViewSet(viewsets.ModelViewSet):
         }.get(message_type)
 
         if not serializer_class:
+            logger.warning(
+                "incident_message_create_invalid_type",
+                incident_id=self.kwargs["incident_pk"],
+                requested_by_user_id=user.id if user else None,
+                message_type=message_type,
+            )
             return Response({"error": "Invalid message type"}, status=status.HTTP_400_BAD_REQUEST)
 
         serializer = serializer_class(data=request.data)
@@ -542,6 +763,20 @@ class IncidentMessageViewSet(viewsets.ModelViewSet):
             msg.content_type = ContentType.objects.get_for_model(content_obj)
             msg.object_id = content_obj.id
             msg.save()
+            logger.info(
+                "incident_message_created",
+                incident_id=self.kwargs["incident_pk"],
+                incident_message_id=msg.id,
+                requested_by_user_id=user.id if user else None,
+                message_type=message_type,
+                content_object_id=content_obj.id,
+                text=getattr(content_obj, "text", None),
+                file_name=(
+                    getattr(getattr(content_obj, "photo", None), "name", None)
+                    or getattr(getattr(content_obj, "video", None), "name", None)
+                    or getattr(getattr(content_obj, "audio", None), "name", None)
+                ),
+            )
             incident = Incident.objects.get(pk=self.kwargs['incident_pk'])
             if incident.point:
                 author_name = (request.user.display_name if request.user.is_authenticated else "Система")
@@ -582,4 +817,11 @@ class IncidentMessageViewSet(viewsets.ModelViewSet):
             return Response(IncidentMessageSerializer(msg).data, status=status.HTTP_201_CREATED)
 
         msg.delete()
+        logger.warning(
+            "incident_message_create_validation_failed",
+            incident_id=self.kwargs["incident_pk"],
+            requested_by_user_id=user.id if user else None,
+            message_type=message_type,
+            errors=serializer.errors,
+        )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)

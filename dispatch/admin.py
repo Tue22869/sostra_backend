@@ -7,6 +7,7 @@ from django.core.exceptions import PermissionDenied
 from django.shortcuts import render
 from django.urls import path, reverse
 from django.utils.html import format_html
+import structlog
 
 from dispatch.models import DutyPoint, DutyRole, Duty, IncidentMessage, TextMessage, VideoMessage, PhotoMessage, \
     AudioMessage, Incident, ExploitationRole, IncidentStatusEnum
@@ -24,6 +25,9 @@ from dispatch.calendar_ru import get_non_working_ranges
 from dispatch.utils import decl, now, today
 from myapp.admin_mixins import CustomAdmin
 from myapp.services.users import get_all_users
+
+
+logger = structlog.get_logger(__name__)
 
 
 class DispatchAdmin(AdminSite):
@@ -212,6 +216,18 @@ class DutyRoleAdmin(CustomAdmin):
                 end_date = duty_form.cleaned_data["end_date"]
                 if end_date is None:
                     end_date = start_date
+                created_count = 0
+                updated_count = 0
+
+                logger.info(
+                    "admin_duty_schedule_add_requested",
+                    duty_role_id=duty_role.id,
+                    duty_user_id=user.id,
+                    start_date=start_date.isoformat(),
+                    end_date=end_date.isoformat(),
+                    duty_step=duty_form.cleaned_data.get("duty_step") or 1,
+                    rest_step=duty_form.cleaned_data.get("rest_step") or 0,
+                )
 
                 # Нерабочие дни по производственному календарю: объединяем в длинные дежурства
                 ranges = get_non_working_ranges(start_date, end_date)
@@ -231,6 +247,9 @@ class DutyRoleAdmin(CustomAdmin):
                     if not created:
                         duty.user = user
                         duty.save()
+                        updated_count += 1
+                    else:
+                        created_count += 1
 
                 # На рабочие дни продолжаем создавать обычные дежурства по шагу/отдыху
                 duty_step = duty_form.cleaned_data.get("duty_step") or 1
@@ -246,9 +265,25 @@ class DutyRoleAdmin(CustomAdmin):
                             )
                             if not created:
                                 duty.user = user
+                                updated_count += 1
+                            else:
+                                created_count += 1
                             duty.save()
                         current_date += timedelta(days=1)
                     current_date += timedelta(days=rest_step)
+                logger.info(
+                    "admin_duty_schedule_add_finished",
+                    duty_role_id=duty_role.id,
+                    duty_user_id=user.id,
+                    created_count=created_count,
+                    updated_count=updated_count,
+                )
+            else:
+                logger.warning(
+                    "admin_duty_schedule_add_validation_failed",
+                    duty_role_id=duty_role.id,
+                    errors=duty_form.errors.get_json_data(),
+                )
         elif request.method == "POST" and request.POST.get("form_type") == "clear_duty_form":
             clear_duty_form = ClearDutyForm(request.POST)
             if clear_duty_form.is_valid():
@@ -256,10 +291,33 @@ class DutyRoleAdmin(CustomAdmin):
                 end_date = clear_duty_form.cleaned_data["end_date"]
                 if end_date is None:
                     end_date = start_date
+                deleted_count = 0
+
+                logger.warning(
+                    "admin_duty_schedule_clear_requested",
+                    duty_role_id=duty_role.id,
+                    start_date=start_date.isoformat(),
+                    end_date=end_date.isoformat(),
+                )
                 current_date = start_date
                 while current_date <= end_date:
+                    deleted_count += Duty.objects.filter(
+                        start_datetime__date=current_date,
+                        role=duty_role,
+                    ).count()
                     delete_duty(current_date, duty_role)
                     current_date += timedelta(days=1)
+                logger.warning(
+                    "admin_duty_schedule_clear_finished",
+                    duty_role_id=duty_role.id,
+                    deleted_count=deleted_count,
+                )
+            else:
+                logger.warning(
+                    "admin_duty_schedule_clear_validation_failed",
+                    duty_role_id=duty_role.id,
+                    errors=clear_duty_form.errors.get_json_data(),
+                )
 
         today_date = today()
         year = int(request.GET.get('year', today_date.year))

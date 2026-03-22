@@ -7,10 +7,14 @@ wait_for_postgres() {
   fi
 
   python - <<'PY'
+import logging
 import os
 import time
 
 import psycopg
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("entrypoint")
 
 config = {
     "dbname": os.getenv("POSTGRES_DB", "sostra"),
@@ -25,10 +29,10 @@ for attempt in range(30):
     try:
         conn = psycopg.connect(**config)
         conn.close()
-        print("PostgreSQL is ready.")
+        logger.info("PostgreSQL is ready.")
         break
     except Exception as exc:
-        print(f"Waiting for PostgreSQL ({attempt + 1}/30): {exc}", flush=True)
+        logger.warning("Waiting for PostgreSQL (%s/30): %s", attempt + 1, exc)
         time.sleep(2)
 else:
     raise SystemExit("PostgreSQL did not become ready in time.")

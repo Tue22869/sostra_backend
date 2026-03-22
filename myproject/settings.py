@@ -13,6 +13,8 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from myproject.observability import build_logging_config, configure_structlog
+
 # from rest_framework_nested.runtests.settings import MIDDLEWARE_CLASSES
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -52,6 +54,7 @@ if DEBUG:
 INSTALLED_APPS = [
     'admin_interface',
     'colorfield',
+    'simple_history',
 
     'users.authconfig.AuthConfig',
     'django.contrib.contenttypes',
@@ -80,6 +83,8 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'myproject.middleware.RequestContextMiddleware',
+    'simple_history.middleware.HistoryRequestMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -237,3 +242,17 @@ AUTH_USER_MODEL = 'users.User'
 
 LOGIN_URL = '/accounts/login/'
 LOGIN_REDIRECT_URL = '/tg_bot/link-telegram'
+
+LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+LOG_DIR = os.getenv('LOG_DIR', str(BASE_DIR / 'logs'))
+LOG_FILE_PREFIX = os.getenv('LOG_FILE_PREFIX', 'application')
+LOG_RETENTION_DAYS = int(os.getenv('LOG_RETENTION_DAYS', '14'))
+LOGGING = build_logging_config(
+    LOG_LEVEL,
+    log_dir=LOG_DIR,
+    filename_prefix=LOG_FILE_PREFIX,
+    retention_days=LOG_RETENTION_DAYS,
+)
+configure_structlog()
+
+SIMPLE_HISTORY_REVERT_DISABLED = True

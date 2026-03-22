@@ -1,6 +1,8 @@
 # dispatch/cron.py
 from datetime import timedelta, datetime, date
 
+import structlog
+
 from dispatch.models import DutyRole, DutyPoint, Duty
 from dispatch.services.access import dispatch_admins
 from dispatch.services.duties import (
@@ -13,18 +15,28 @@ from dispatch.utils import now, today
 from users.models import NotificationSourceEnum
 
 
+logger = structlog.get_logger(__name__)
+
+
 def need_to_open_notification():
-    print(f"CRON PING {datetime.now()}")
-
     duties = get_current_duties(now(), start_offset=30)
+    logger.info(
+        "need_to_open_notification_started",
+        run_at=datetime.now().isoformat(),
+        duty_count=duties.count(),
+    )
 
+    coming_notifications = 0
+    reminder_notifications = 0
+    auto_opened_duties = 0
     for duty in duties:
-        print(duty)
         if not duty.is_opened and duty.notification_duty_is_coming is None:
             title = "Вам назначено дежурство сегодня"
             text = f"Дежурство в роли: {duty.role.name}"
             duty.notification_duty_is_coming = create_and_notify(duty.user, title, text, NotificationSourceEnum.DISPATCH.value)
             duty.save()
+            coming_notifications += 1
+            logger.info("duty_coming_notification_created", duty_id=duty.id, duty_user_id=duty.user_id)
 
         # Повторное уведомление через 15 минут после первого, если дежурство еще не принято
         if (not duty.is_opened 
@@ -35,6 +47,8 @@ def need_to_open_notification():
             text = f"Дежурство в роли: {duty.role.name} еще не принято. Пожалуйста, откройте дежурство в приложении."
             duty.notification_duty_reminder = create_and_notify(duty.user, title, text, NotificationSourceEnum.DISPATCH.value)
             duty.save()
+            reminder_notifications += 1
+            logger.info("duty_reminder_notification_created", duty_id=duty.id, duty_user_id=duty.user_id)
 
         # Автоматическое открытие дежурства через 15 минут после напоминания, если дежурство еще не принято
         if (not duty.is_opened and duty.notification_need_to_open is None
@@ -49,6 +63,13 @@ def need_to_open_notification():
                 NotificationSourceEnum.DISPATCH.value,
             )
             duty.save()
+            auto_opened_duties += 1
+            logger.warning(
+                "duty_auto_opened_by_scheduler",
+                duty_id=duty.id,
+                duty_user_id=duty.user_id,
+                duty_role_id=duty.role_id,
+            )
 
             admins = list(dispatch_admins())
             for point in get_duty_point_by_duty_role(duty.role):
@@ -61,17 +82,30 @@ def need_to_open_notification():
                 NotificationSourceEnum.DISPATCH.value,
             )
 
+    logger.info(
+        "need_to_open_notification_finished",
+        checked_duty_count=duties.count(),
+        coming_notifications=coming_notifications,
+        reminder_notifications=reminder_notifications,
+        auto_opened_duties=auto_opened_duties,
+    )
+
 
 def check_missing_duties():
     """Проверяет отсутствующие дежурства на ближайшие 3 дня и уведомляет админов"""
-    print(f"Checking missing duties {datetime.now()}")
-    
     today_date = today()
     check_end_date = today_date + timedelta(days=3)
+    logger.info(
+        "check_missing_duties_started",
+        run_at=datetime.now().isoformat(),
+        start_date=today_date.isoformat(),
+        end_date=check_end_date.isoformat(),
+    )
     
     # Получаем все точки дежурств
     duty_points = DutyPoint.objects.all()
-    
+    points_with_missing_days = 0
+
     for point in duty_points:
         missing_days = []
         roles_to_check = []
@@ -95,6 +129,7 @@ def check_missing_duties():
         
         # Если есть хотя бы один день без дежурства, уведомляем админов точки
         if missing_days:
+            points_with_missing_days += 1
             missing_info = []
             for missing_date, missing_role in missing_days:
                 missing_info.append(f"{missing_date.strftime('%d.%m.%Y')} - {missing_role.name}")
@@ -109,4 +144,18 @@ def check_missing_duties():
                 NotificationSourceEnum.DISPATCH.value,
             )
 
+            logger.warning(
+                "missing_duties_detected",
+                point_id=point.id,
+                missing_days=[
+                    {"date": missing_date.isoformat(), "role_id": missing_role.id}
+                    for missing_date, missing_role in missing_days
+                ],
+            )
+
+    logger.info(
+        "check_missing_duties_finished",
+        checked_point_count=duty_points.count(),
+        points_with_missing_days=points_with_missing_days,
+    )
 

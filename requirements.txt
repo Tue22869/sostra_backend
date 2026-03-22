@@ -3,6 +3,7 @@ django==5.0.4
 djangorestframework==3.15.1
 pytz==2024.1
 django-admin-interface==0.28.6
+django-simple-history==3.11.0
 gunicorn==23.0.0
 psycopg[binary]==3.2.12
 openpyxl==3.1.5
@@ -16,3 +17,4 @@ python-telegram-bot==20.8
 django_apscheduler==0.7.0
 apscheduler==3.11.2
 workalendar==17.0.0
+structlog==25.5.0

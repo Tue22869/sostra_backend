@@ -1,6 +1,8 @@
 from django.contrib import admin
+from simple_history.admin import SimpleHistoryAdmin
 
-class CustomAdmin(admin.ModelAdmin): 
+
+class CustomAdmin(SimpleHistoryAdmin):
        
     def changeform_view(self, request, object_id=None, form_url='', extra_context=None):
         extra_context = extra_context or {}
