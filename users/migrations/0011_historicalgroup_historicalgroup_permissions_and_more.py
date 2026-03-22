@@ -11,7 +11,6 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('auth', '0014_alter_group_id_alter_permission_id_alter_user_id'),
         ('dispatch', '0023_historicalaudiomessage_historicalduty_and_more'),
         ('users', '0010_user_phone_passwordresettoken'),
     ]
