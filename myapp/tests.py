@@ -11,7 +11,7 @@ from django_apscheduler.models import DjangoJob, DjangoJobExecution
 
 from myapp.management.commands.run_scheduler import scheduler
 from myapp.scheduler_utils import cleanup_old_job_executions
-from myproject.observability import DailyStructuredFileHandler
+from myproject.observability import DailyStructuredFileHandler, build_logging_config
 
 
 class DailyStructuredFileHandlerTests(TestCase):
@@ -47,6 +47,21 @@ class DailyStructuredFileHandlerTests(TestCase):
             self.assertIn("hello world", current_log.read_text(encoding="utf-8"))
             self.assertFalse((log_dir / "application-2026-03-01.log").exists())
             self.assertTrue((log_dir / "application-2026-03-08.log").exists())
+
+    def test_json_formatter_preserves_unicode_characters(self):
+        processor = build_logging_config()["formatters"]["json"]["processor"]
+
+        rendered = processor(
+            None,
+            "info",
+            {
+                "event": "notification_created",
+                "notification_title": "Отсутствуют дежурства в системе",
+            },
+        )
+
+        self.assertIn("Отсутствуют дежурства в системе", rendered)
+        self.assertNotIn("\\u041e", rendered)
 
 
 class SchedulerAdminTests(TestCase):

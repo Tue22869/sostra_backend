@@ -149,7 +149,10 @@ def build_logging_config(
         "formatters": {
             "json": {
                 "()": structlog.stdlib.ProcessorFormatter,
-                "processor": structlog.processors.JSONRenderer(sort_keys=True),
+                "processor": structlog.processors.JSONRenderer(
+                    sort_keys=True,
+                    ensure_ascii=False,
+                ),
                 "foreign_pre_chain": foreign_pre_chain,
             },
         },
