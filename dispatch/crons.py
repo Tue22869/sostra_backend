@@ -8,7 +8,7 @@ from dispatch.services.access import dispatch_admins
 from dispatch.services.duties import (
     get_current_duties,
     get_duty_point_by_duty_role,
-    get_duties_by_date,
+    get_duties_covering_date,
 )
 from dispatch.services.notification import create_and_notify, notify_users, notify_point_admins
 from dispatch.utils import now, today
@@ -122,7 +122,7 @@ def check_missing_duties():
         for role in roles_to_check:
             current_date = today_date
             while current_date <= check_end_date:
-                duties = get_duties_by_date(current_date, role)
+                duties = get_duties_covering_date(current_date, role)
                 if not duties.exists():
                     missing_days.append((current_date, role))
                 current_date += timedelta(days=1)
@@ -158,4 +158,3 @@ def check_missing_duties():
         checked_point_count=duty_points.count(),
         points_with_missing_days=points_with_missing_days,
     )
-

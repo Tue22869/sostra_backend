@@ -1,4 +1,5 @@
-from datetime import timedelta
+from datetime import date, datetime, timedelta, timezone as dt_timezone
+from unittest.mock import patch
 
 from django.test import TestCase
 from django.urls import reverse
@@ -6,8 +7,10 @@ from django.core.exceptions import ValidationError
 from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from dispatch.crons import check_missing_duties
 from dispatch.admin import ClearDutyForm, DutyAdminForm, DutyForm
-from dispatch.models import Duty, DutyAction, DutyActionTypeEnum, DutyRole, Incident
+from dispatch.models import Duty, DutyAction, DutyActionTypeEnum, DutyPoint, DutyRole, Incident
+from dispatch.services.duties import duty_overlaps_range
 from dispatch.views import DutyViewSet
 from dispatch.utils import now, today
 from dispatch.models import IncidentStatusEnum
@@ -231,3 +234,236 @@ class DutyProtectionTests(TestCase):
         self.assertEqual(history_record.history_user, self.user)
         self.assertEqual(history_record.history_type, "~")
         self.assertEqual(history_record.status, IncidentStatusEnum.CLOSED.value)
+
+
+class MissingDutiesCronTests(TestCase):
+    def setUp(self):
+        self.user_index = 0
+
+    def _create_user(self, prefix="duty-user"):
+        self.user_index += 1
+        return User.objects.create_user(
+            username=f"{prefix}-{self.user_index}",
+            password="pass",
+        )
+
+    def _create_point(self, name, level_1_name=None, level_2_name=None, level_3_name=None):
+        roles = {}
+        point_kwargs = {"name": name}
+
+        for level, role_name in (
+            (1, level_1_name),
+            (2, level_2_name),
+            (3, level_3_name),
+        ):
+            if role_name is None:
+                continue
+            role = DutyRole.objects.create(name=role_name)
+            roles[level] = role
+            point_kwargs[f"level_{level}_role"] = role
+
+        point = DutyPoint.objects.create(**point_kwargs)
+        return point, roles
+
+    def _create_daily_duty(self, role, duty_date, user=None):
+        user = user or self._create_user("daily-duty")
+        return Duty.objects.create(
+            user=user,
+            role=role,
+            start_datetime=datetime(
+                duty_date.year,
+                duty_date.month,
+                duty_date.day,
+                14,
+                30,
+                tzinfo=dt_timezone.utc,
+            ),
+            end_datetime=datetime(
+                (duty_date + timedelta(days=1)).year,
+                (duty_date + timedelta(days=1)).month,
+                (duty_date + timedelta(days=1)).day,
+                5,
+                30,
+                tzinfo=dt_timezone.utc,
+            ),
+        )
+
+    def _create_range_duty(self, role, range_start, range_end, user=None):
+        user = user or self._create_user("range-duty")
+        duty_start_date = range_start - timedelta(days=1)
+        day_after_end = range_end + timedelta(days=1)
+        return Duty.objects.create(
+            user=user,
+            role=role,
+            start_datetime=datetime(
+                duty_start_date.year,
+                duty_start_date.month,
+                duty_start_date.day,
+                14,
+                30,
+                tzinfo=dt_timezone.utc,
+            ),
+            end_datetime=datetime(
+                day_after_end.year,
+                day_after_end.month,
+                day_after_end.day,
+                5,
+                30,
+                tzinfo=dt_timezone.utc,
+            ),
+        )
+
+    def _assign_daily_duties(self, role, start_date, end_date, user=None):
+        user = user or self._create_user("assigned-duty")
+        current_date = start_date
+        while current_date <= end_date:
+            self._create_daily_duty(role, current_date, user=user)
+            current_date += timedelta(days=1)
+        return user
+
+    @patch("dispatch.crons.notify_point_admins")
+    @patch("dispatch.crons.today", return_value=date(2026, 3, 28))
+    def test_check_missing_duties_skips_multiday_duty_ranges(self, _today_mock, notify_point_admins_mock):
+        point, roles = self._create_point("Водозаборный узел", level_1_name="Начальник ЛОС и ВЗУ")
+        self._create_range_duty(roles[1], date(2026, 3, 28), date(2026, 3, 31))
+
+        check_missing_duties()
+
+        notify_point_admins_mock.assert_not_called()
+
+    @patch("dispatch.crons.notify_point_admins")
+    @patch("dispatch.crons.today", return_value=date(2026, 3, 25))
+    def test_check_missing_duties_skips_notification_when_all_days_are_filled(
+        self,
+        _today_mock,
+        notify_point_admins_mock,
+    ):
+        point, roles = self._create_point(
+            "ЛОС производственных стоков",
+            level_1_name="Начальник ЛОС и ВЗУ",
+            level_2_name="Дежурный сантехник ЛОС и ВЗУ",
+            level_3_name="Главный энергетик",
+        )
+        start_date = date(2026, 3, 25)
+        end_date = date(2026, 3, 28)
+
+        for role in roles.values():
+            self._assign_daily_duties(role, start_date, end_date)
+
+        check_missing_duties()
+
+        notify_point_admins_mock.assert_not_called()
+
+    @patch("dispatch.crons.notify_point_admins")
+    @patch("dispatch.crons.today", return_value=date(2026, 3, 25))
+    def test_check_missing_duties_sends_notification_for_missing_role_on_one_day(
+        self,
+        _today_mock,
+        notify_point_admins_mock,
+    ):
+        point, roles = self._create_point(
+            "ЛОС производственных стоков",
+            level_1_name="Начальник ЛОС и ВЗУ",
+            level_2_name="Дежурный сантехник ЛОС и ВЗУ",
+            level_3_name="Главный энергетик",
+        )
+        start_date = date(2026, 3, 25)
+        end_date = date(2026, 3, 28)
+
+        self._assign_daily_duties(roles[1], start_date, end_date)
+        self._assign_daily_duties(roles[3], start_date, end_date)
+        missing_role_user = self._create_user("missing-role")
+        # Последний день больше не считается покрытым целиком, если смена заканчивается утром.
+        # Поэтому для реального пропуска 27.03 оставляем смены на 25.03, 26.03 и 28.03.
+        self._create_daily_duty(roles[2], date(2026, 3, 25), user=missing_role_user)
+        self._create_daily_duty(roles[2], date(2026, 3, 26), user=missing_role_user)
+        self._create_daily_duty(roles[2], date(2026, 3, 28), user=missing_role_user)
+
+        check_missing_duties()
+
+        notify_point_admins_mock.assert_called_once()
+        args = notify_point_admins_mock.call_args.args
+        self.assertEqual(args[0], point)
+        self.assertEqual(args[1], f"Отсутствуют дежурства в системе {point.name}")
+        self.assertEqual(
+            args[2],
+            "В ближайшие 3 дня не назначены дежурства:\n27.03.2026 - Дежурный сантехник ЛОС и ВЗУ",
+        )
+        self.assertEqual(args[3], NotificationSourceEnum.DISPATCH.value)
+
+    @patch("dispatch.crons.notify_point_admins")
+    @patch("dispatch.crons.today", return_value=date(2026, 3, 25))
+    def test_check_missing_duties_notifies_only_points_with_missing_duties(
+        self,
+        _today_mock,
+        notify_point_admins_mock,
+    ):
+        complete_point, complete_roles = self._create_point(
+            "Водозаборный узел",
+            level_1_name="Начальник ЛОС и ВЗУ",
+            level_2_name="Дежурный оператор ВЗУ",
+            level_3_name="Главный энергетик",
+        )
+        missing_point, missing_roles = self._create_point(
+            "Система канализации",
+            level_1_name="Начальник ЛОС и ВЗУ",
+            level_2_name="Дежурный сантехник ЛОС и ВЗУ",
+            level_3_name="Главный энергетик",
+        )
+        start_date = date(2026, 3, 25)
+        end_date = date(2026, 3, 28)
+
+        for role in complete_roles.values():
+            self._assign_daily_duties(role, start_date, end_date)
+
+        self._assign_daily_duties(missing_roles[1], start_date, end_date)
+        self._assign_daily_duties(missing_roles[2], start_date, end_date)
+        self._assign_daily_duties(missing_roles[3], start_date, date(2026, 3, 26))
+
+        check_missing_duties()
+
+        notify_point_admins_mock.assert_called_once()
+        args = notify_point_admins_mock.call_args.args
+        self.assertEqual(args[0], missing_point)
+        self.assertIn("28.03.2026 - Главный энергетик", args[2])
+
+    @patch("dispatch.crons.notify_point_admins")
+    @patch("dispatch.crons.today", return_value=date(2026, 3, 26))
+    def test_check_missing_duties_does_not_count_end_day_covered_by_morning_finish(
+        self,
+        _today_mock,
+        notify_point_admins_mock,
+    ):
+        point, roles = self._create_point(
+            "Водозаборный узел",
+            level_1_name="Начальник ЛОС и ВЗУ",
+        )
+        role = roles[1]
+        user = self._create_user("edge-case")
+
+        self._create_daily_duty(role, date(2026, 3, 25), user=user)
+        self._create_daily_duty(role, date(2026, 3, 27), user=user)
+        self._create_daily_duty(role, date(2026, 3, 28), user=user)
+        self._create_daily_duty(role, date(2026, 3, 29), user=user)
+
+        check_missing_duties()
+
+        notify_point_admins_mock.assert_called_once()
+        args = notify_point_admins_mock.call_args.args
+        self.assertEqual(args[0], point)
+        self.assertEqual(
+            args[2],
+            "В ближайшие 3 дня не назначены дежурства:\n26.03.2026 - Начальник ЛОС и ВЗУ",
+        )
+
+    def test_duty_overlaps_range_does_not_treat_morning_end_as_overlap_for_start_day(self):
+        _, roles = self._create_point(
+            "Водозаборный узел",
+            level_1_name="Начальник ЛОС и ВЗУ",
+        )
+        role = roles[1]
+        user = self._create_user("overlap-case")
+
+        self._create_daily_duty(role, date(2026, 3, 25), user=user)
+
+        self.assertFalse(duty_overlaps_range(role, date(2026, 3, 26), date(2026, 3, 28)))

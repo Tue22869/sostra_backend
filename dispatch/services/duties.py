@@ -25,12 +25,14 @@ def get_duties_by_date(start_date: date, role: DutyRole = None):
 def get_duties_covering_date(day_date: date, role: DutyRole = None):
     """
     Дежурства, которые покрывают данный день (включая многодневные).
-    День входит в дежурство, если [start_datetime, end_datetime) пересекается с этим днём:
-    start_datetime.date() <= day_date и end_datetime.date() >= day_date.
+    Для календарной проверки день считается покрытым, если он входит в диапазон
+    [start_datetime.date(), end_datetime.date()).
+    Это позволяет учитывать многодневные выходные дежурства, но не считать
+    последний день покрытым целиком, если смена заканчивается утром.
     """
     qs = Duty.objects.filter(
         start_datetime__date__lte=day_date,
-        end_datetime__date__gte=day_date,
+        end_datetime__date__gt=day_date,
     )
     if role is not None:
         qs = qs.filter(role=role)
@@ -88,11 +90,14 @@ def get_or_create_duty(duty_date: date, role: DutyRole, defaults):
 
 
 def duty_overlaps_range(role: DutyRole, range_start: date, range_end: date) -> bool:
-    """Проверяет, есть ли у роли дежурство, пересекающееся с периодом [range_start, range_end]."""
+    """
+    Проверяет, есть ли у роли дежурство, покрывающее хотя бы один день периода
+    [range_start, range_end] в той же календарной семантике [start_date, end_date).
+    """
     return Duty.objects.filter(
         role=role,
         start_datetime__date__lte=range_end,
-        end_datetime__date__gte=range_start,
+        end_datetime__date__gt=range_start,
     ).exists()
 
 
