@@ -168,10 +168,6 @@ cython_debug/
 media/dish_photos
 media/feedback_photos
 
-# PWA build artifacts
-pwa/*
-!pwa/.gitkeep
-
 # PostgreSQL backups
 backups/*
 !backups/postgres/.gitkeep
