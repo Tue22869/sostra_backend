@@ -1,2 +1,12 @@
+.git/
 .venv
 .env
+.idea/
+.vscode/
+.pytest_cache/
+db.sqlite3
+application-*.log
+pwa/
+logs/
+backups/
+certbot/
